@@ -79,4 +79,8 @@ class SizeMap {
         return mRatios.isEmpty();
     }
 
+    @Override
+    public String toString() {
+        return mRatios.toString();
+    }
 }

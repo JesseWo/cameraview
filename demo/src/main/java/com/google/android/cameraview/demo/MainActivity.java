@@ -248,6 +248,11 @@ public class MainActivity extends AppCompatActivity implements
         }
 
         @Override
+        public void onCameraError(CameraView cameraView, Exception e, int type) {
+            e.printStackTrace();
+        }
+
+        @Override
         public void onPictureTaken(CameraView cameraView, final byte[] data) {
             Log.d(TAG, "onPictureTaken " + data.length);
             Toast.makeText(cameraView.getContext(), R.string.picture_taken, Toast.LENGTH_SHORT)

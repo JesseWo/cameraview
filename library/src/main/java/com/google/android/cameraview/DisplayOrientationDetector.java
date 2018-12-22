@@ -25,10 +25,13 @@ import android.view.Surface;
 
 /**
  * Monitors the value returned from {@link Display#getRotation()}.
+ * the wrapper for OrientationEventListener
  */
 abstract class DisplayOrientationDetector {
 
     private final OrientationEventListener mOrientationEventListener;
+    private static final String TAG = "DisplayOrientation";
+    private static final boolean debug = BuildConfig.DEBUG;
 
     /** Mapping from Surface.Rotation_n to degrees. */
     static final SparseIntArray DISPLAY_ORIENTATIONS = new SparseIntArray();
@@ -56,7 +59,8 @@ abstract class DisplayOrientationDetector {
                         mDisplay == null) {
                     return;
                 }
-                final int rotation = mDisplay.getRotation();
+                //the rotation of the screen from its "natural" orientation.
+                final int rotation = mDisplay.getRotation();//this value will be 0, if you set current Activity screenOrientation=portrait manifest.xml
                 if (mLastKnownRotation != rotation) {
                     mLastKnownRotation = rotation;
                     dispatchOnDisplayOrientationChanged(DISPLAY_ORIENTATIONS.get(rotation));

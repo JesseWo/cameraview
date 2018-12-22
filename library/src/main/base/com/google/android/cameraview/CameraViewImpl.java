@@ -29,6 +29,13 @@ abstract class CameraViewImpl {
     CameraViewImpl(Callback callback, PreviewImpl preview) {
         mCallback = callback;
         mPreview = preview;
+        //触摸对焦
+        getView().setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                manualFocus();
+            }
+        });
     }
 
     View getView() {
@@ -61,6 +68,8 @@ abstract class CameraViewImpl {
 
     abstract boolean getAutoFocus();
 
+    abstract void manualFocus();
+
     abstract void setFlash(int flash);
 
     abstract int getFlash();
@@ -77,6 +86,7 @@ abstract class CameraViewImpl {
 
         void onPictureTaken(byte[] data);
 
+        void onCameraError(Exception e, @CameraView.Error int type);
     }
 
 }

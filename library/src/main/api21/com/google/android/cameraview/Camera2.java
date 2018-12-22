@@ -30,6 +30,7 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
+import android.media.MediaActionSound;
 import android.support.annotation.NonNull;
 import android.util.Log;
 import android.util.SparseIntArray;
@@ -45,6 +46,7 @@ import java.util.SortedSet;
 class Camera2 extends CameraViewImpl {
 
     private static final String TAG = "Camera2";
+    private static final boolean debug = BuildConfig.DEBUG;
 
     private static final SparseIntArray INTERNAL_FACINGS = new SparseIntArray();
 
@@ -87,8 +89,10 @@ class Camera2 extends CameraViewImpl {
 
         @Override
         public void onError(@NonNull CameraDevice camera, int error) {
-            Log.e(TAG, "onError: " + camera.getId() + " (" + error + ")");
             mCamera = null;
+            String errorMsg = "Camera2 internal onError: " + camera.getId() + " (" + error + ")";
+            Log.e(TAG, errorMsg);
+            mCallback.onCameraError(new RuntimeException(errorMsg), CameraView.ERROR_CAMERA_INTERNAL);
         }
 
     };
@@ -196,6 +200,8 @@ class Camera2 extends CameraViewImpl {
 
     private int mDisplayOrientation;
 
+    private MediaActionSound mActionSound;
+
     Camera2(Callback callback, PreviewImpl preview, Context context) {
         super(callback, preview);
         mCameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
@@ -207,15 +213,32 @@ class Camera2 extends CameraViewImpl {
         });
     }
 
+    /**
+     * 当INFO_SUPPORTED_HARDWARE_LEVEL == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY, return false;
+     * 然后cameraImpl切换为camera1
+     *
+     * @return
+     */
     @Override
     boolean start() {
-        if (!chooseCameraIdByFacing()) {
-            return false;
+        try {
+            if (!chooseCameraIdByFacing())
+                return false;
+            collectCameraInfo();
+            prepareImageReader();
+            startOpeningCamera();
+            loadMediaActionSound();
+        } catch (RuntimeException e) {
+            mCamera = null;
+            mCallback.onCameraError(e, CameraView.ERROR_NO_PERMISSION);
         }
-        collectCameraInfo();
-        prepareImageReader();
-        startOpeningCamera();
         return true;
+    }
+
+    private void loadMediaActionSound() {
+        mActionSound = new MediaActionSound();
+        mActionSound.load(MediaActionSound.FOCUS_COMPLETE);
+        mActionSound.load(MediaActionSound.SHUTTER_CLICK);
     }
 
     @Override
@@ -231,6 +254,10 @@ class Camera2 extends CameraViewImpl {
         if (mImageReader != null) {
             mImageReader.close();
             mImageReader = null;
+        }
+        if (mActionSound != null) {
+            mActionSound.release();
+            mActionSound = null;
         }
     }
 
@@ -307,6 +334,42 @@ class Camera2 extends CameraViewImpl {
         return mAutoFocus;
     }
 
+    private CameraCaptureSession.CaptureCallback mManualFocusCallBack
+            = new CameraCaptureSession.CaptureCallback() {
+        @Override
+        public void onCaptureStarted(@NonNull CameraCaptureSession session,
+                                     @NonNull CaptureRequest request,
+                                     long timestamp, long frameNumber) {
+            unlockFocus();
+        }
+
+        @Override
+        public void onCaptureCompleted(@NonNull CameraCaptureSession session,
+                                       @NonNull CaptureRequest request,
+                                       @NonNull TotalCaptureResult result) {
+            /*//对焦声音太难听!
+            if (mActionSound != null) {
+                mActionSound.play(MediaActionSound.FOCUS_COMPLETE);//shutter sound
+            }*/
+        }
+    };
+
+    /**
+     * 手动触屏对焦
+     */
+    @Override
+    void manualFocus() {
+        if (!isCameraOpened())
+            return;
+        mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
+        try {
+            mCaptureSession.capture(mPreviewRequestBuilder.build(), mManualFocusCallBack, null);//may throw exception
+        } catch (CameraAccessException | IllegalArgumentException | IllegalStateException e) {
+            Log.e(TAG, "Failed to lock focus.", e);
+            mCallback.onCameraError(e, CameraView.ERROR_AUTO_FOCUS);
+        }
+    }
+
     @Override
     void setFlash(int flash) {
         if (mFlash == flash) {
@@ -347,6 +410,10 @@ class Camera2 extends CameraViewImpl {
         mPreview.setDisplayOrientation(mDisplayOrientation);
     }
 
+    Size getPictureSize() {
+        return mPictureSizes.sizes(mAspectRatio).last();
+    }
+
     /**
      * <p>Chooses a camera ID by the specified camera facing ({@link #mFacing}).</p>
      * <p>This rewrites {@link #mCameraId}, {@link #mCameraCharacteristics}, and optionally
@@ -377,13 +444,14 @@ class Camera2 extends CameraViewImpl {
                     return true;
                 }
             }
-            // Not found
+            // Not found, 兜底: 选中的camera不可用, 则默认用第一个camera
             mCameraId = ids[0];
             mCameraCharacteristics = mCameraManager.getCameraCharacteristics(mCameraId);
             Integer level = mCameraCharacteristics.get(
                     CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL);
-            if (level == null ||
-                    level == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY) {
+            if (CameraView.defaultCameraImpl != CameraView.CAMERA_IMPL_2
+                    && (level == null || level == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY)) {
+                //此时换用 Camera1
                 return false;
             }
             Integer internal = mCameraCharacteristics.get(CameraCharacteristics.LENS_FACING);
@@ -447,7 +515,7 @@ class Camera2 extends CameraViewImpl {
         if (mImageReader != null) {
             mImageReader.close();
         }
-        Size largest = mPictureSizes.sizes(mAspectRatio).last();
+        Size largest = getPictureSize();
         mImageReader = ImageReader.newInstance(largest.getWidth(), largest.getHeight(),
                 ImageFormat.JPEG, /* maxImages */ 2);
         mImageReader.setOnImageAvailableListener(mOnImageAvailableListener, null);
@@ -469,22 +537,27 @@ class Camera2 extends CameraViewImpl {
      * <p>Starts a capture session for camera preview.</p>
      * <p>This rewrites {@link #mPreviewRequestBuilder}.</p>
      * <p>The result will be continuously processed in {@link #mSessionCallback}.</p>
+     *
+     * @return execution succeed ?.
      */
-    void startCaptureSession() {
+    boolean startCaptureSession() {
+        boolean flag = false;
         if (!isCameraOpened() || !mPreview.isReady() || mImageReader == null) {
-            return;
+            return flag;
         }
         Size previewSize = chooseOptimalSize();
         mPreview.setBufferSize(previewSize.getWidth(), previewSize.getHeight());
         Surface surface = mPreview.getSurface();
         try {
-            mPreviewRequestBuilder = mCamera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            mPreviewRequestBuilder = mCamera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);//may throw exception
             mPreviewRequestBuilder.addTarget(surface);
             mCamera.createCaptureSession(Arrays.asList(surface, mImageReader.getSurface()),
                     mSessionCallback, null);
-        } catch (CameraAccessException e) {
-            throw new RuntimeException("Failed to start camera session");
+            flag = true;
+        } catch (CameraAccessException | IllegalArgumentException | IllegalStateException e) {
+            mCallback.onCameraError(new RuntimeException("Failed to start camera session"), CameraView.ERROR_START_SESSION);
         }
+        return flag;
     }
 
     /**
@@ -584,9 +657,10 @@ class Camera2 extends CameraViewImpl {
                 CaptureRequest.CONTROL_AF_TRIGGER_START);
         try {
             mCaptureCallback.setState(PictureCaptureCallback.STATE_LOCKING);
-            mCaptureSession.capture(mPreviewRequestBuilder.build(), mCaptureCallback, null);
-        } catch (CameraAccessException e) {
+            mCaptureSession.capture(mPreviewRequestBuilder.build(), mCaptureCallback, null);//may throw exception
+        } catch (CameraAccessException | IllegalArgumentException | IllegalStateException e) {
             Log.e(TAG, "Failed to lock focus.", e);
+            mCallback.onCameraError(e, CameraView.ERROR_AUTO_FOCUS);
         }
     }
 
@@ -595,11 +669,17 @@ class Camera2 extends CameraViewImpl {
      */
     void captureStillPicture() {
         try {
+            if (mActionSound != null) {
+                mActionSound.play(MediaActionSound.SHUTTER_CLICK);//shutter sound
+            }
+
             CaptureRequest.Builder captureRequestBuilder = mCamera.createCaptureRequest(
                     CameraDevice.TEMPLATE_STILL_CAPTURE);
             captureRequestBuilder.addTarget(mImageReader.getSurface());
+            //自动对焦
             captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE,
                     mPreviewRequestBuilder.get(CaptureRequest.CONTROL_AF_MODE));
+            //自动曝光
             switch (mFlash) {
                 case Constants.FLASH_OFF:
                     captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE,
@@ -647,6 +727,7 @@ class Camera2 extends CameraViewImpl {
                     }, null);
         } catch (CameraAccessException e) {
             Log.e(TAG, "Cannot capture a still picture.", e);
+            mCallback.onCameraError(e, CameraView.ERROR_TAKE_PICTURE);
         }
     }
 
@@ -668,6 +749,7 @@ class Camera2 extends CameraViewImpl {
             mCaptureCallback.setState(PictureCaptureCallback.STATE_PREVIEW);
         } catch (CameraAccessException e) {
             Log.e(TAG, "Failed to restart camera preview.", e);
+            mCallback.onCameraError(e, CameraView.ERROR_START_PREVIEW);
         }
     }
 

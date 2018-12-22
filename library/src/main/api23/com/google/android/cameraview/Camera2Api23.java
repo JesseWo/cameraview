@@ -34,7 +34,7 @@ class Camera2Api23 extends Camera2 {
         // Try to get hi-res output sizes
         android.util.Size[] outputSizes = map.getHighResolutionOutputSizes(ImageFormat.JPEG);
         if (outputSizes != null) {
-            for (android.util.Size size : map.getHighResolutionOutputSizes(ImageFormat.JPEG)) {
+            for (android.util.Size size : outputSizes) {
                 sizes.add(new Size(size.getWidth(), size.getHeight()));
             }
         }

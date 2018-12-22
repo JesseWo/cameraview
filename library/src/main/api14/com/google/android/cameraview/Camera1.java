@@ -21,6 +21,7 @@ import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
 import android.os.Build;
 import android.support.v4.util.SparseArrayCompat;
+import android.util.Log;
 import android.view.SurfaceHolder;
 
 import java.io.IOException;
@@ -34,6 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 class Camera1 extends CameraViewImpl {
 
     private static final int INVALID_CAMERA_ID = -1;
+    private static final String TAG = "Camera1";
+    private static final boolean debug = BuildConfig.DEBUG;
 
     private static final SparseArrayCompat<String> FLASH_MODES = new SparseArrayCompat<>();
 
@@ -88,12 +91,15 @@ class Camera1 extends CameraViewImpl {
     boolean start() {
         chooseCamera();
         openCamera();
-        if (mPreview.isReady()) {
-            setUpPreview();
+        boolean isCameraOpened = isCameraOpened();
+        if (isCameraOpened) {
+            if (mPreview.isReady()) {
+                setUpPreview();
+            }
+            mShowingPreview = true;
+            startPreview();
         }
-        mShowingPreview = true;
-        mCamera.startPreview();
-        return true;
+        return isCameraOpened;
     }
 
     @Override
@@ -116,7 +122,7 @@ class Camera1 extends CameraViewImpl {
                 }
                 mCamera.setPreviewDisplay(mPreview.getSurfaceHolder());
                 if (needsToStopPreview) {
-                    mCamera.startPreview();
+                    startPreview();
                 }
             } else {
                 mCamera.setPreviewTexture((SurfaceTexture) mPreview.getSurfaceTexture());
@@ -128,7 +134,7 @@ class Camera1 extends CameraViewImpl {
 
     @Override
     boolean isCameraOpened() {
-        return mCamera != null;
+        return mCamera != null && mCameraParameters != null;
     }
 
     @Override
@@ -183,13 +189,44 @@ class Camera1 extends CameraViewImpl {
         return mAspectRatio;
     }
 
+    /**
+     * 设置连续自动对焦
+     *
+     * @param autoFocus default true
+     */
     @Override
     void setAutoFocus(boolean autoFocus) {
         if (mAutoFocus == autoFocus) {
             return;
         }
         if (setAutoFocusInternal(autoFocus)) {
+            setParameters();
+        }
+    }
+
+    /**
+     * 统一异常处理
+     * 使Camera parameters生效
+     */
+    private void setParameters() {
+        try {
             mCamera.setParameters(mCameraParameters);
+        } catch (RuntimeException e) {
+            //if any parameter is invalid or not supported.
+            mCallback.onCameraError(e, CameraView.ERROR_SET_PARAMS);
+        }
+    }
+
+    /**
+     * 统一异常处理
+     * 开始预览
+     */
+    private void startPreview() {
+        try {
+            mCamera.startPreview();
+        } catch (RuntimeException e) {
+            //if any parameter is invalid or not supported.
+            mCallback.onCameraError(e, CameraView.ERROR_START_PREVIEW);
         }
     }
 
@@ -202,13 +239,35 @@ class Camera1 extends CameraViewImpl {
         return focusMode != null && focusMode.contains("continuous");
     }
 
+    /**
+     * 手动触摸屏幕对焦
+     */
+    @Override
+    void manualFocus() {
+        if (!isCameraOpened())
+            return;
+        try {
+            setAutoFocus(false);//关闭连续自动对焦,开启一次对焦
+            mCamera.autoFocus(new Camera.AutoFocusCallback() {
+                @Override
+                public void onAutoFocus(boolean success, Camera camera) {
+                    mCamera.cancelAutoFocus();
+                    setAutoFocus(true);//开启连续自动对焦
+                }
+            });
+        } catch (RuntimeException e) {
+            //auto focus may throw some exception
+            mCallback.onCameraError(e, CameraView.ERROR_AUTO_FOCUS);
+        }
+    }
+
     @Override
     void setFlash(int flash) {
         if (flash == mFlash) {
             return;
         }
         if (setFlashInternal(flash)) {
-            mCamera.setParameters(mCameraParameters);
+            setParameters();
         }
     }
 
@@ -224,13 +283,18 @@ class Camera1 extends CameraViewImpl {
                     "Camera is not ready. Call start() before takePicture().");
         }
         if (getAutoFocus()) {
-            mCamera.cancelAutoFocus();
-            mCamera.autoFocus(new Camera.AutoFocusCallback() {
-                @Override
-                public void onAutoFocus(boolean success, Camera camera) {
-                    takePictureInternal();
-                }
-            });
+            try {
+                mCamera.cancelAutoFocus();
+                mCamera.autoFocus(new Camera.AutoFocusCallback() {
+                    @Override
+                    public void onAutoFocus(boolean success, Camera camera) {
+                        takePictureInternal();
+                    }
+                });
+            } catch (RuntimeException e) {
+                //auto focus may throw some exception
+                mCallback.onCameraError(e, CameraView.ERROR_AUTO_FOCUS);
+            }
         } else {
             takePictureInternal();
         }
@@ -238,18 +302,36 @@ class Camera1 extends CameraViewImpl {
 
     void takePictureInternal() {
         if (!isPictureCaptureInProgress.getAndSet(true)) {
-            mCamera.takePicture(null, null, null, new Camera.PictureCallback() {
-                @Override
-                public void onPictureTaken(byte[] data, Camera camera) {
-                    isPictureCaptureInProgress.set(false);
-                    mCallback.onPictureTaken(data);
-                    camera.cancelAutoFocus();
-                    camera.startPreview();
-                }
-            });
+            try {
+                //The shutter callback can be used to trigger a sound to let the user know that image has been captured.
+                mCamera.takePicture(new Camera.ShutterCallback() {
+                    @Override
+                    public void onShutter() {
+                        if (debug) Log.d(TAG, "onShutter");
+                    }
+                }, null, null, new Camera.PictureCallback() {
+                    @Override
+                    public void onPictureTaken(byte[] data, Camera camera) {
+                        isPictureCaptureInProgress.set(false);
+                        mCallback.onPictureTaken(data);
+                        camera.cancelAutoFocus();
+                        try {
+                            camera.startPreview();
+                        } catch (RuntimeException e) {
+                            mCallback.onCameraError(e, CameraView.ERROR_START_PREVIEW);
+                        }
+                    }
+                });
+            } catch (RuntimeException e) {
+                //takePicture may throw some exception
+                mCallback.onCameraError(e, CameraView.ERROR_TAKE_PICTURE);
+            }
         }
     }
 
+    /**
+     * @param displayOrientation 竖屏模式下为0；逆时针选择为90；顺时针旋转为270
+     */
     @Override
     void setDisplayOrientation(int displayOrientation) {
         if (mDisplayOrientation == displayOrientation) {
@@ -265,7 +347,7 @@ class Camera1 extends CameraViewImpl {
             }
             mCamera.setDisplayOrientation(calcDisplayOrientation(displayOrientation));
             if (needsToStopPreview) {
-                mCamera.startPreview();
+                startPreview();
             }
         }
     }
@@ -288,45 +370,89 @@ class Camera1 extends CameraViewImpl {
         if (mCamera != null) {
             releaseCamera();
         }
-        mCamera = Camera.open(mCameraId);
-        mCameraParameters = mCamera.getParameters();
-        // Supported preview sizes
-        mPreviewSizes.clear();
-        for (Camera.Size size : mCameraParameters.getSupportedPreviewSizes()) {
-            mPreviewSizes.add(new Size(size.width, size.height));
+        try {
+            mCamera = Camera.open(mCameraId);
+            if (mCamera == null)
+                throw new RuntimeException("Camera unavailable: camera is null!");
+            mCameraParameters = mCamera.getParameters();
+            if (mCameraParameters == null)
+                throw new RuntimeException("Camera unavailable: cameraParameters is null!");
+            // Supported preview sizes
+            mPreviewSizes.clear();
+            for (Camera.Size size : mCameraParameters.getSupportedPreviewSizes()) {
+                mPreviewSizes.add(new Size(size.width, size.height));
+            }
+            Log.i(TAG, "mPreviewSizes: " + mPreviewSizes.toString());
+            // Supported picture sizes;
+            mPictureSizes.clear();
+            for (Camera.Size size : mCameraParameters.getSupportedPictureSizes()) {
+                mPictureSizes.add(new Size(size.width, size.height));
+            }
+            Log.i(TAG, "mPictureSizes: " + mPictureSizes.toString());
+            // AspectRatio
+            if (mAspectRatio == null) {
+                mAspectRatio = Constants.DEFAULT_ASPECT_RATIO;
+            }
+            adjustCameraParameters();
+            mCamera.setDisplayOrientation(calcDisplayOrientation(mDisplayOrientation));
+            mCallback.onCameraOpened();
+        } catch (RuntimeException e) {
+            //"openCamera | getParameters" will throw Exception when current app has no permission or another error;
+            mCallback.onCameraError(e, CameraView.ERROR_NO_PERMISSION);
         }
-        // Supported picture sizes;
-        mPictureSizes.clear();
-        for (Camera.Size size : mCameraParameters.getSupportedPictureSizes()) {
-            mPictureSizes.add(new Size(size.width, size.height));
-        }
-        // AspectRatio
-        if (mAspectRatio == null) {
-            mAspectRatio = Constants.DEFAULT_ASPECT_RATIO;
-        }
-        adjustCameraParameters();
-        mCamera.setDisplayOrientation(calcDisplayOrientation(mDisplayOrientation));
-        mCallback.onCameraOpened();
     }
 
-    private AspectRatio chooseAspectRatio() {
-        AspectRatio r = null;
-        for (AspectRatio ratio : mPreviewSizes.ratios()) {
-            r = ratio;
-            if (ratio.equals(Constants.DEFAULT_ASPECT_RATIO)) {
-                return ratio;
+    private boolean isAspectRatioValid(AspectRatio r) {
+        Set<AspectRatio> previewRatios = mPreviewSizes.ratios();
+        Set<AspectRatio> pictureRatios = mPictureSizes.ratios();
+        return previewRatios.contains(r) && pictureRatios.contains(r);
+    }
+
+    /**
+     * added by Jessewo in 2018/12/22
+     *
+     * @param r
+     * @return
+     */
+    private AspectRatio adjustAspectRatio(AspectRatio r) {
+        if (isAspectRatioValid(r)) {
+            if (debug) Log.d(TAG, "adjustAspectRatio original aspectRatio is valid: " + r);
+            return r;
+        }
+        //fallback1 4:3
+        if (!Constants.DEFAULT_ASPECT_RATIO.equals(r)) {
+            r = Constants.DEFAULT_ASPECT_RATIO;
+            if (isAspectRatioValid(r)) {
+                if (debug) Log.d(TAG, "adjustAspectRatio fallback1: " + r);
+                return r;
             }
         }
-        return r;
+        //fallback2 16:9
+        if (!Constants.DEFAULT_ASPECT_RATIO_BK.equals(r)) {
+            r = Constants.DEFAULT_ASPECT_RATIO_BK;
+            if (isAspectRatioValid(r)) {
+                if (debug) Log.d(TAG, "adjustAspectRatio fallback2: " + r);
+                return r;
+            }
+        }
+        //fallback3
+        for (AspectRatio previewRatio : mPreviewSizes.ratios()) {
+            for (AspectRatio pictureRatio : mPictureSizes.ratios()) {
+                if (previewRatio.equals(pictureRatio)) {
+                    Log.e(TAG, "adjustAspectRatio fallback3: " + previewRatio);
+                    return previewRatio;
+                }
+            }
+        }
+        throw new RuntimeException("no appropriate aspectRatio!");
     }
 
     void adjustCameraParameters() {
-        SortedSet<Size> sizes = mPreviewSizes.sizes(mAspectRatio);
-        if (sizes == null) { // Not supported
-            mAspectRatio = chooseAspectRatio();
-            sizes = mPreviewSizes.sizes(mAspectRatio);
-        }
-        Size size = chooseOptimalSize(sizes);
+        mAspectRatio = adjustAspectRatio(mAspectRatio);
+
+        /* 选择最佳preview size */
+        SortedSet<Size> previewSizes = mPreviewSizes.sizes(mAspectRatio);
+        Size previewSize = chooseOptimalSize(previewSizes);
 
         // Always re-apply camera parameters
         // Largest picture size in this ratio
@@ -334,17 +460,26 @@ class Camera1 extends CameraViewImpl {
         if (mShowingPreview) {
             mCamera.stopPreview();
         }
-        mCameraParameters.setPreviewSize(size.getWidth(), size.getHeight());
+        mCameraParameters.setPreviewSize(previewSize.getWidth(), previewSize.getHeight());
         mCameraParameters.setPictureSize(pictureSize.getWidth(), pictureSize.getHeight());
         mCameraParameters.setRotation(calcCameraRotation(mDisplayOrientation));
         setAutoFocusInternal(mAutoFocus);
         setFlashInternal(mFlash);
-        mCamera.setParameters(mCameraParameters);
+        setParameters();
         if (mShowingPreview) {
-            mCamera.startPreview();
+            startPreview();
         }
+        if (debug) Log.d(TAG, "adjustCameraParameters, AspectRatio: " + mAspectRatio
+                + ", previewSize: " + previewSize
+                + ", pictureSize: " + pictureSize);
     }
 
+    /**
+     * choose optimal preview size according to mPreview(预览UI长宽) size and mDisplayOrientation（屏幕方向）
+     *
+     * @param sizes
+     * @return
+     */
     @SuppressWarnings("SuspiciousNameCombination")
     private Size chooseOptimalSize(SortedSet<Size> sizes) {
         if (!mPreview.isReady()) { // Not yet laid out
@@ -383,9 +518,9 @@ class Camera1 extends CameraViewImpl {
     /**
      * Calculate display orientation
      * https://developer.android.com/reference/android/hardware/Camera.html#setDisplayOrientation(int)
-     *
+     * <p>
      * This calculation is used for orienting the preview
-     *
+     * <p>
      * Note: This is not the same calculation as the camera rotation
      *
      * @param screenOrientationDegrees Screen orientation in degrees
@@ -401,10 +536,10 @@ class Camera1 extends CameraViewImpl {
 
     /**
      * Calculate camera rotation
-     *
+     * <p>
      * This calculation is applied to the output JPEG either via Exif Orientation tag
      * or by actually transforming the bitmap. (Determined by vendor camera API implementation)
-     *
+     * <p>
      * Note: This is not the same calculation as the display orientation
      *
      * @param screenOrientationDegrees Screen orientation in degrees
@@ -437,11 +572,11 @@ class Camera1 extends CameraViewImpl {
         mAutoFocus = autoFocus;
         if (isCameraOpened()) {
             final List<String> modes = mCameraParameters.getSupportedFocusModes();
-            if (autoFocus && modes.contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE)) {
+            if (autoFocus && modes.contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE)) {//持续对焦
                 mCameraParameters.setFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE);
             } else if (modes.contains(Camera.Parameters.FOCUS_MODE_FIXED)) {
                 mCameraParameters.setFocusMode(Camera.Parameters.FOCUS_MODE_FIXED);
-            } else if (modes.contains(Camera.Parameters.FOCUS_MODE_INFINITY)) {
+            } else if (modes.contains(Camera.Parameters.FOCUS_MODE_INFINITY)) {//无穷远
                 mCameraParameters.setFocusMode(Camera.Parameters.FOCUS_MODE_INFINITY);
             } else {
                 mCameraParameters.setFocusMode(modes.get(0));
@@ -457,7 +592,7 @@ class Camera1 extends CameraViewImpl {
      */
     private boolean setFlashInternal(int flash) {
         if (isCameraOpened()) {
-            List<String> modes = mCameraParameters.getSupportedFlashModes();
+            List<String> modes = mCameraParameters.getSupportedFlashModes();//off/auto/on/torch
             String mode = FLASH_MODES.get(flash);
             if (modes != null && modes.contains(mode)) {
                 mCameraParameters.setFlashMode(mode);

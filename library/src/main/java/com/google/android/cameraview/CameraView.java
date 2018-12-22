@@ -29,6 +29,7 @@ import android.support.v4.os.ParcelableCompat;
 import android.support.v4.os.ParcelableCompatCreatorCallbacks;
 import android.support.v4.view.ViewCompat;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.widget.FrameLayout;
 
 import java.lang.annotation.Retention;
@@ -37,6 +38,9 @@ import java.util.ArrayList;
 import java.util.Set;
 
 public class CameraView extends FrameLayout {
+
+    private static final String TAG = "CameraView";
+    private static final boolean debug = BuildConfig.DEBUG;
 
     /** The camera device faces the opposite direction as the device's screen. */
     public static final int FACING_BACK = Constants.FACING_BACK;
@@ -70,6 +74,26 @@ public class CameraView extends FrameLayout {
     public @interface Flash {
     }
 
+    public static final int ERROR_NO_PERMISSION = 11;
+    public static final int ERROR_SET_PARAMS = 12;
+    public static final int ERROR_TAKE_PICTURE = 13;
+    public static final int ERROR_AUTO_FOCUS = 14;
+    public static final int ERROR_START_PREVIEW = 15;
+    //error for camera2
+    public static final int ERROR_START_SESSION = 21;
+    public static final int ERROR_CAMERA_INTERNAL = 22;//camera2内部错误,@see CameraDevice.StateCallback
+
+    @IntDef({ERROR_NO_PERMISSION, ERROR_SET_PARAMS, ERROR_TAKE_PICTURE, ERROR_AUTO_FOCUS, ERROR_START_PREVIEW,
+            ERROR_START_SESSION, ERROR_CAMERA_INTERNAL})
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface Error {
+    }
+
+    public static final int CAMERA_IMPL_1 = 1;
+    public static final int CAMERA_IMPL_2 = 2;
+    public static final int CAMERA_IMPL_NOT_SET = -1;
+    static int defaultCameraImpl = CAMERA_IMPL_NOT_SET;
+
     CameraViewImpl mImpl;
 
     private final CallbackBridge mCallbacks;
@@ -89,7 +113,7 @@ public class CameraView extends FrameLayout {
     @SuppressWarnings("WrongConstant")
     public CameraView(Context context, AttributeSet attrs, int defStyleAttr) {
         super(context, attrs, defStyleAttr);
-        if (isInEditMode()){
+        if (isInEditMode()) {
             mCallbacks = null;
             mDisplayOrientationDetector = null;
             return;
@@ -97,25 +121,24 @@ public class CameraView extends FrameLayout {
         // Internal setup
         final PreviewImpl preview = createPreviewImpl(context);
         mCallbacks = new CallbackBridge();
-        if (Build.VERSION.SDK_INT < 21) {
-            mImpl = new Camera1(mCallbacks, preview);
-        } else if (Build.VERSION.SDK_INT < 23) {
-            mImpl = new Camera2(mCallbacks, preview, context);
-        } else {
-            mImpl = new Camera2Api23(mCallbacks, preview, context);
-        }
+        //添加自定义camera 实现类开关-> 便于debug
+        chooseCameraImpl(debug, context, preview);
         // Attributes
         TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.CameraView, defStyleAttr,
                 R.style.Widget_CameraView);
         mAdjustViewBounds = a.getBoolean(R.styleable.CameraView_android_adjustViewBounds, false);
+        //前置/后置镜头
         setFacing(a.getInt(R.styleable.CameraView_facing, FACING_BACK));
+        //长宽比
         String aspectRatio = a.getString(R.styleable.CameraView_aspectRatio);
         if (aspectRatio != null) {
             setAspectRatio(AspectRatio.parse(aspectRatio));
         } else {
             setAspectRatio(Constants.DEFAULT_ASPECT_RATIO);
         }
+        //自动对焦
         setAutoFocus(a.getBoolean(R.styleable.CameraView_autoFocus, true));
+        //闪光灯
         setFlash(a.getInt(R.styleable.CameraView_flash, Constants.FLASH_AUTO));
         a.recycle();
         // Display orientation detector
@@ -127,15 +150,30 @@ public class CameraView extends FrameLayout {
         };
     }
 
+    private void chooseCameraImpl(boolean debug, Context context, PreviewImpl preview) {
+        if (debug && defaultCameraImpl != CAMERA_IMPL_NOT_SET) {
+            switch (defaultCameraImpl) {
+                case CAMERA_IMPL_1:
+                    mImpl = new Camera1(mCallbacks, preview);
+                    break;
+                case CAMERA_IMPL_2:
+                    mImpl = new Camera2(mCallbacks, preview, context);
+                    break;
+            }
+        } else {
+            if (Build.VERSION.SDK_INT < 21) {
+                mImpl = new Camera1(mCallbacks, preview);
+            } else if (Build.VERSION.SDK_INT < 23) {
+                mImpl = new Camera2(mCallbacks, preview, context);
+            } else {
+                mImpl = new Camera2Api23(mCallbacks, preview, context);
+            }
+        }
+    }
+
     @NonNull
     private PreviewImpl createPreviewImpl(Context context) {
-        PreviewImpl preview;
-        if (Build.VERSION.SDK_INT < 14) {
-            preview = new SurfaceViewPreview(context, this);
-        } else {
-            preview = new TextureViewPreview(context, this);
-        }
-        return preview;
+        return new TextureViewPreview(context, this);
     }
 
     @Override
@@ -156,7 +194,7 @@ public class CameraView extends FrameLayout {
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        if (isInEditMode()){
+        if (isInEditMode()) {
             super.onMeasure(widthMeasureSpec, heightMeasureSpec);
             return;
         }
@@ -197,6 +235,8 @@ public class CameraView extends FrameLayout {
         int width = getMeasuredWidth();
         int height = getMeasuredHeight();
         AspectRatio ratio = getAspectRatio();
+        if (ratio == null)
+            return;
         if (mDisplayOrientationDetector.getLastKnownDisplayOrientation() % 180 == 0) {
             ratio = ratio.inverse();
         }
@@ -245,12 +285,13 @@ public class CameraView extends FrameLayout {
     public void start() {
         if (!mImpl.start()) {
             //store the state ,and restore this state after fall back o Camera1
-            Parcelable state=onSaveInstanceState();
+            Parcelable state = onSaveInstanceState();
             // Camera2 uses legacy hardware layer; fall back to Camera1
             mImpl = new Camera1(mCallbacks, createPreviewImpl(getContext()));
             onRestoreInstanceState(state);
             mImpl.start();
         }
+        if (debug) Log.d(TAG, "camera start: " + mImpl);
     }
 
     /**
@@ -380,6 +421,13 @@ public class CameraView extends FrameLayout {
     }
 
     /**
+     * 手动对焦
+     */
+    public void manualFocus() {
+        mImpl.manualFocus();
+    }
+
+    /**
      * Sets the flash mode.
      *
      * @param flash The desired flash mode.
@@ -439,6 +487,13 @@ public class CameraView extends FrameLayout {
         public void onCameraClosed() {
             for (Callback callback : mCallbacks) {
                 callback.onCameraClosed(CameraView.this);
+            }
+        }
+
+        @Override
+        public void onCameraError(Exception e, @Error int type) {
+            for (Callback callback : mCallbacks) {
+                callback.onCameraError(CameraView.this, e, type);
             }
         }
 
@@ -525,6 +580,16 @@ public class CameraView extends FrameLayout {
          * @param cameraView The associated {@link CameraView}.
          */
         public void onCameraClosed(CameraView cameraView) {
+        }
+
+        /**
+         * Called when camera throw Exception
+         *
+         * @param cameraView
+         * @param e
+         * @param type
+         */
+        public void onCameraError(CameraView cameraView, Exception e, @Error int type) {
         }
 
         /**
