@@ -20,6 +20,7 @@ android {
     defaultConfig {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
+        versionName "1.1.0"
         testInstrumentationRunner 'android.support.test.runner.AndroidJUnitRunner'
     }
     buildTypes {
@@ -34,7 +35,31 @@ android {
         main.java.srcDirs += 'src/main/api21'
         main.java.srcDirs += 'src/main/api23'
     }
+
+    //配置自定义打包名称
+    libraryVariants.all { variant ->
+        variant.outputs.all {
+            def formattedDate = new Date().format('yyyyMMdd')
+            outputFileName = "cameraview_${variant.mergedFlavor.versionName}_${formattedDate}.aar";
+        }
+    }
+
 }
+
+task deleteAARs(type: Delete) {
+    delete fileTree('../public')
+}
+
+task copyAAR(type: Copy) {
+    from 'build/outputs/aar/'
+    into '../public/'
+}
+
+task buildAAR(dependsOn: ["deleteAARs", "assembleRelease", "copyAAR"]) {
+    copyAAR.mustRunAfter deleteAARs
+}
+
+
 
 dependencies {
     implementation "com.android.support:support-annotations:$supportLibraryVersion"

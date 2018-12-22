@@ -56,3 +56,10 @@ You can see a complete usage in the demo app.
 ## Contribution
 
 See [CONTRIBUTING.md](/CONTRIBUTING.md).
+
+
+## generate an aar
+```bash
+./gradlew -p library buildAAR
+```
+outputs dir: ./public

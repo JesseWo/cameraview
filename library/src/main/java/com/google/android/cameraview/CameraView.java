@@ -71,6 +71,7 @@ public class CameraView extends FrameLayout {
 
     /** The mode for for the camera device's flash control */
     @IntDef({FLASH_OFF, FLASH_ON, FLASH_TORCH, FLASH_AUTO, FLASH_RED_EYE})
+    @Retention(RetentionPolicy.SOURCE)
     public @interface Flash {
     }
 
